@@ -152,9 +152,9 @@ func main() {
 		},
 	}
 
-	cmd.Flags().IntVarP(&config.count, "count", "c", 10, "number of pings to send")
+	cmd.Flags().IntVarP(&config.count, "count", "c", 4, "number of pings to send")
 	cmd.Flags().IntVarP(&config.interval, "interval", "i", 1000, "interval between pings in milliseconds")
-	cmd.Flags().IntVarP(&config.timeout, "timeout", "t", 5000, "timeout in milliseconds for each ping")
+	cmd.Flags().IntVarP(&config.timeout, "timeout", "t", 2000, "timeout in milliseconds for each ping")
 	cmd.Flags().IntVarP(&config.size, "size", "s", 56, "size of ping packet payload in bytes")
 	cmd.Flags().BoolVarP(&config.quiet, "quiet", "q", false, "only show summary statistics")
 	cmd.Flags().IntVarP(&config.retries, "retry", "r", 0, "number of retries for failed pings")
@@ -448,6 +448,8 @@ func pingHost(target string, config *PingConfig) PingResult {
 				// Marshal to JSON and print
 				progressJSON, _ := json.Marshal(progress)
 				fmt.Println(string(progressJSON))
+				// Flush stdout to ensure progress is shown immediately
+				os.Stdout.Sync()
 			}
 
 			// Wait for interval
