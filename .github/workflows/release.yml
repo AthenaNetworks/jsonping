@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger on version tags
+
+permissions:
+  contents: write # Needed for creating releases
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            binary: jsonping
+          - os: linux
+            arch: arm64
+            binary: jsonping
+          - os: darwin
+            arch: amd64
+            binary: jsonping
+          - os: darwin
+            arch: arm64
+            binary: jsonping
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          go build -o ${{ matrix.binary }}-${{ matrix.os }}-${{ matrix.arch }}
+          chmod +x ${{ matrix.binary }}-${{ matrix.os }}-${{ matrix.arch }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.binary }}-${{ matrix.os }}-${{ matrix.arch }}
+          path: ${{ matrix.binary }}-${{ matrix.os }}-${{ matrix.arch }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v3
+
+      - name: Create SHA256 checksums
+        run: |
+          for file in jsonping-*; do
+            sha256sum "$file" >> checksums.txt
+          done
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            jsonping-*
+            checksums.txt
+          generate_release_notes: true
+          draft: false
+          prerelease: false
