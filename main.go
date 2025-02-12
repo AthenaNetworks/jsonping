@@ -340,11 +340,7 @@ func pingHost(target string, config *PingConfig) PingResult {
 			reply := make([]byte, 1500)
 			
 			// Set read timeout
-			tv := syscall.Timeval{
-				Sec:  int64(config.timeout / 1000),
-				Usec: int64((config.timeout % 1000) * 1000),
-			}
-			err = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
+			err := setSocketTimeout(fd, config.timeout)
 			if err != nil {
 				result.Error = fmt.Sprintf("Error setting read timeout: %v", err)
 				continue
