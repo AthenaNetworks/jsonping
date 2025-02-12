@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"math"
 	"net"
 	"os"
 	"os/signal"
@@ -122,75 +121,78 @@ type PingConfig struct {
 }
 
 func main() {
-	config := PingConfig{}
+	var config PingConfig
 
-	cmd := &cobra.Command{
-		Use:   "jsonping [targets...]",
-		Short: "A simple ping utility with JSON output",
+	rootCmd := &cobra.Command{
+		Use:   "jsonping [flags] target...",
+		Short: "A ping utility that outputs results in JSON format",
 		Args:  cobra.MinimumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			var results []PingResult
-
+			// Handle parallel pinging
 			if config.parallel {
-				// Process targets in parallel batches
-				results = pingParallel(args, &config)
-			} else {
-				// Process targets sequentially
-				for _, target := range args {
-					result := pingHost(target, &config)
-					results = append(results, result)
+				results := pingParallel(args, &config)
+				if !config.quiet {
+					fmt.Fprintln(os.Stderr, "All pings completed")
 				}
+				json.NewEncoder(os.Stdout).Encode(results)
+			} else {
+				// Single target mode
+				target := args[0]
+				result := pingHost(target, &config)
+				json.NewEncoder(os.Stdout).Encode([]PingResult{result})
 			}
-
-			// Output JSON
-			json, err := json.Marshal(results)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error encoding JSON: %v\n", err)
-				os.Exit(1)
-			}
-			fmt.Println(string(json))
 		},
 	}
 
-	cmd.Flags().IntVarP(&config.count, "count", "c", 4, "number of pings to send")
-	cmd.Flags().IntVarP(&config.interval, "interval", "i", 1000, "interval between pings in milliseconds")
-	cmd.Flags().IntVarP(&config.timeout, "timeout", "t", 2000, "timeout in milliseconds for each ping")
-	cmd.Flags().IntVarP(&config.size, "size", "s", 56, "size of ping packet payload in bytes")
-	cmd.Flags().BoolVarP(&config.quiet, "quiet", "q", false, "only show summary statistics")
-	cmd.Flags().IntVarP(&config.retries, "retry", "r", 0, "number of retries for failed pings")
-	cmd.Flags().IntVarP(&config.period, "period", "p", 1000, "time in milliseconds between ping retries")
-	cmd.Flags().StringVarP(&config.source, "source", "S", "", "source IP address")
-	cmd.Flags().BoolVarP(&config.ipv6, "ipv6", "6", false, "use IPv6 instead of IPv4")
-	cmd.Flags().BoolVarP(&config.parallel, "parallel", "a", false, "ping hosts in parallel")
-	cmd.Flags().IntVarP(&config.maxBatch, "batch", "B", 100, "max hosts to ping in parallel (with -a)")
-	cmd.Flags().BoolVarP(&config.dontFragment, "dont-fragment", "M", false, "set don't fragment bit")
+	flags := rootCmd.Flags()
+	flags.IntVarP(&config.count, "count", "c", 4, "Number of pings to send")
+	flags.IntVarP(&config.interval, "interval", "i", 1000, "Interval between pings in milliseconds")
+	flags.IntVarP(&config.timeout, "timeout", "W", 1000, "Time to wait for each response in milliseconds")
+	flags.IntVarP(&config.size, "size", "s", 56, "Size of ping data in bytes")
+	flags.BoolVarP(&config.quiet, "quiet", "q", false, "Quiet output")
+	flags.IntVarP(&config.retries, "retry", "r", 0, "Number of retries for failed pings")
+	flags.IntVarP(&config.period, "period", "p", 100, "Time between retries in milliseconds")
+	flags.StringVar(&config.source, "source", "", "Source IP address")
+	flags.BoolVarP(&config.ipv6, "ipv6", "6", false, "Use IPv6")
+	flags.BoolVarP(&config.parallel, "parallel", "P", false, "Ping multiple targets in parallel")
+	flags.IntVarP(&config.maxBatch, "max-batch", "B", 100, "Maximum number of parallel pings")
+	flags.BoolVarP(&config.dontFragment, "dont-fragment", "M", false, "Set Don't Fragment bit")
 
-	if err := cmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
 // pingParallel pings multiple hosts in parallel batches
 func pingParallel(targets []string, config *PingConfig) []PingResult {
-	var results []PingResult
-	resultChan := make(chan PingResult)
-	semaphore := make(chan struct{}, config.maxBatch)
-
-	// Start a goroutine for each target
-	for _, target := range targets {
-		go func(t string) {
-			semaphore <- struct{}{} // Acquire semaphore
-			result := pingHost(t, config)
-			resultChan <- result
-			<-semaphore // Release semaphore
-		}(target)
+	results := make([]PingResult, len(targets))
+	batchSize := config.maxBatch
+	if batchSize > len(targets) {
+		batchSize = len(targets)
 	}
 
-	// Collect results
-	for i := 0; i < len(targets); i++ {
-		result := <-resultChan
-		results = append(results, result)
+	// Process targets in batches
+	for i := 0; i < len(targets); i += batchSize {
+		end := i + batchSize
+		if end > len(targets) {
+			end = len(targets)
+		}
+
+		// Create channels for each target in this batch
+		resultChan := make(chan PingResult, end-i)
+
+		// Start a goroutine for each target
+		for j := i; j < end; j++ {
+			go func(target string) {
+				resultChan <- pingHost(target, config)
+			}(targets[j])
+		}
+
+		// Collect results for this batch
+		for j := i; j < end; j++ {
+			results[j] = <-resultChan
+		}
 	}
 
 	return results
@@ -245,6 +247,15 @@ func pingHost(target string, config *PingConfig) PingResult {
 	var latencies []float64
 	result.Transmitted = 0
 
+	// Ensure minimum packet size for our data
+	minSize := 16 // 8 bytes for timestamp + 8 bytes for magic string
+	if config.size < minSize {
+		if !config.quiet {
+			fmt.Fprintf(os.Stderr, "Warning: Increasing packet size from %d to %d bytes to accommodate timestamp and magic string\n", config.size, minSize)
+		}
+		config.size = minSize
+	}
+
 	// Create packet data
 	data := make([]byte, config.size)
 	
@@ -256,7 +267,7 @@ func pingHost(target string, config *PingConfig) PingResult {
 	copy(data[8:], []byte("JSONPING"))
 	
 	// Fill remaining with incrementing pattern
-	for i := 8 + len("JSONPING"); i < config.size; i++ {
+	for i := 16; i < config.size; i++ {
 		data[i] = byte(i)
 	}
 
@@ -288,9 +299,6 @@ func pingHost(target string, config *PingConfig) PingResult {
 			destAddr := syscall.SockaddrInet4{Port: 0}
 			copy(destAddr.Addr[:], addr.IP.To4())
 
-			// Send ping
-			start := time.Now()
-			
 			// Send using raw socket
 			err = syscall.Sendto(fd, msgBytes, 0, &destAddr)
 			if err != nil {
@@ -398,90 +406,80 @@ func pingHost(target string, config *PingConfig) PingResult {
 			icmpData := reply[20:] // Skip IP header
 			icmpType := icmpData[0]     // Type (1 byte)
 			icmpCode := icmpData[1]     // Code (1 byte)
+			icmpId := binary.BigEndian.Uint16(icmpData[4:6])   // Identifier (2 bytes)
+			icmpSeq := binary.BigEndian.Uint16(icmpData[6:8])  // Sequence number (2 bytes)
 
-			// For Echo Reply, verify ID and sequence
-			icmpId := binary.BigEndian.Uint16(icmpData[4:6])       // ID (2 bytes)
-			icmpSeq := binary.BigEndian.Uint16(icmpData[6:8])      // Sequence (2 bytes)
-
-			// Verify this is an Echo Reply with correct code and matching ID/SEQ
-			if icmpType != 0 || icmpCode != 0 || icmpId != packet.Identifier || icmpSeq != packet.SequenceNum {
+			// Verify Echo Reply
+			if icmpType != 0 || icmpCode != 0 { // Type 0 = Echo Reply
 				continue
 			}
 
-			// Calculate latency
-			duration := float64(time.Since(start).Nanoseconds()) / 1_000_000.0 // Convert nanoseconds to milliseconds
-			latencies = append(latencies, duration)
-			result.Received++
+			// Verify identifier matches
+			if icmpId != uint16(pid) {
+				continue
+			}
 
-			// Print progress if not quiet
+			// Verify sequence number matches
+			if icmpSeq != uint16(i) {
+				continue
+			}
+
+			// Extract timestamp from reply data
+			if n < 36 { // IP(20) + ICMP(8) + Data(8)
+				continue
+			}
+			sentTime := int64(binary.BigEndian.Uint64(icmpData[8:16]))
+			latency := float64(time.Now().UnixNano()-sentTime) / float64(time.Millisecond)
+			latencies = append(latencies, latency)
+
+			// Update progress if not in quiet mode
 			if !config.quiet {
-				// Calculate average latency
-				avg := duration
-				if len(latencies) > 1 {
-					sum := 0.0
-					for _, lat := range latencies {
-						sum += lat
-					}
-					avg = sum / float64(len(latencies))
-				}
-
-				// Calculate loss percentage
-				loss := 0.0
-				if result.Transmitted > 0 {
-					loss = 100.0 - (float64(result.Received)/float64(result.Transmitted))*100.0
-				}
-
-				// Create progress struct
 				progress := Progress{
 					Target:     target,
 					Sequence:   i + 1,
 					Size:       len(msgBytes),
-					Latency:    duration,
-					AvgLatency: avg,
-					Loss:       loss,
+					Latency:    latency,
+					Loss:       float64(result.Transmitted-len(latencies)) / float64(result.Transmitted) * 100.0,
 				}
-
-				// Marshal to JSON and print
-				progressJSON, _ := json.Marshal(progress)
-				fmt.Println(string(progressJSON))
-				// Flush stdout to ensure progress is shown immediately
-				os.Stdout.Sync()
-			}
-
-			// Wait for interval
-			if i < config.count-1 { // Don't wait after last ping
-				time.Sleep(time.Duration(config.interval) * time.Millisecond)
+				if len(latencies) > 0 {
+					var sum float64
+					for _, l := range latencies {
+						sum += l
+					}
+					progress.AvgLatency = sum / float64(len(latencies))
+				}
+				json.NewEncoder(os.Stdout).Encode(progress)
 			}
 		}
 	}
 
 	// Calculate statistics
-	result.EndTime = time.Now()
-	if len(latencies) > 0 {
+	result.Received = len(latencies)
+	if result.Transmitted > 0 {
+		result.LossPercentage = float64(result.Transmitted-result.Received) / float64(result.Transmitted) * 100.0
+	} else {
+		result.LossPercentage = 100.0
+	}
+
+	if result.Received > 0 {
+		// Calculate min/avg/max latency
 		result.MinLatency = latencies[0]
 		result.MaxLatency = latencies[0]
-		sum := latencies[0]
-
-		for _, lat := range latencies[1:] {
-			sum += lat
-			result.MinLatency = math.Min(result.MinLatency, lat)
-			result.MaxLatency = math.Max(result.MaxLatency, lat)
+		var sum float64
+		for _, latency := range latencies {
+			if latency < result.MinLatency {
+				result.MinLatency = latency
+			}
+			if latency > result.MaxLatency {
+				result.MaxLatency = latency
+			}
+			sum += latency
 		}
-
-		result.AvgLatency = sum / float64(len(latencies))
-	} else {
-		// Set to 0 if no successful pings
-		result.MinLatency = 0
-		result.MaxLatency = 0
-		result.AvgLatency = 0
+		result.AvgLatency = sum / float64(result.Received)
 	}
 
-	// Calculate loss percentage
-	if result.Transmitted > 0 {
-		result.LossPercentage = 100 - (float64(result.Received)/float64(result.Transmitted))*100
-	} else {
-		result.LossPercentage = 100
-	}
-
+	result.EndTime = time.Now()
 	return result
 }
+
+
