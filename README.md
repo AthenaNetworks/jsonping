@@ -1,5 +1,7 @@
 # jsonping
 
+**Note: This is a work in progress. For a fully implemented JSON output in fping, check out [this merge request](https://github.com/schweikert/fping/pull/379).**
+
 A high-performance, low-level ICMP ping utility that outputs results in JSON format. Built with raw sockets for maximum efficiency and control.
 
 ## Features
