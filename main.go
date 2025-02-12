@@ -259,10 +259,6 @@ func pingHost(target string, config *PingConfig) PingResult {
 	// Create packet data
 	data := make([]byte, config.size)
 	
-	// First 8 bytes: timestamp for RTT calculation
-	timestamp := time.Now().UnixNano()
-	binary.BigEndian.PutUint64(data[0:8], uint64(timestamp))
-	
 	// Next bytes: magic string to identify our ping
 	copy(data[8:], []byte("JSONPING"))
 	
@@ -298,6 +294,11 @@ func pingHost(target string, config *PingConfig) PingResult {
 			// Create destination address
 			destAddr := syscall.SockaddrInet4{Port: 0}
 			copy(destAddr.Addr[:], addr.IP.To4())
+
+			// Store timestamp right before sending
+			timestamp := time.Now().UnixNano()
+			binary.BigEndian.PutUint64(data[0:8], uint64(timestamp))
+			msgBytes = packet.marshal()
 
 			// Send using raw socket
 			err = syscall.Sendto(fd, msgBytes, 0, &destAddr)
@@ -431,11 +432,27 @@ func pingHost(target string, config *PingConfig) PingResult {
 			}
 
 			// Extract timestamp from reply data
-			if n < 36 { // IP(20) + ICMP(8) + Data(8)
+			if n < 44 { // IP(20) + ICMP(8) + Data(16 = 8 for timestamp + 8 for magic)
+				if !config.quiet {
+					fmt.Fprintf(os.Stderr, "Packet too small: %d bytes\n", n)
+				}
 				continue
 			}
+
+			// Verify magic string
+			magic := string(icmpData[16:24])
+			if magic != "JSONPING" {
+				if !config.quiet {
+					fmt.Fprintf(os.Stderr, "Invalid magic string: %q\n", magic)
+				}
+				continue
+			}
+
+			// Extract timestamp from reply data (which is our original timestamp)
 			sentTime := int64(binary.BigEndian.Uint64(icmpData[8:16]))
-			latency := float64(time.Now().UnixNano()-sentTime) / float64(time.Millisecond)
+			// Convert to time.Time for better precision
+			sent := time.Unix(0, sentTime)
+			latency := float64(time.Since(sent).Nanoseconds()) / float64(time.Millisecond)
 			latencies = append(latencies, latency)
 
 			// Update progress if not in quiet mode
