@@ -370,6 +370,12 @@ func pingHost(target string, config *PingConfig) PingResult {
 						}
 						result.Transmitted++
 
+						// Set socket timeout for retry
+						err = setSocketTimeout(fd, config.timeout)
+						if err != nil {
+							continue
+						}
+
 						// Wait for reply
 						n, fromAddr, err = syscall.Recvfrom(fd, reply, 0)
 						if err == nil {
